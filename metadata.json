@@ -1,0 +1,6 @@
+{
+  "name": "ShopPilot AI",
+  "description": "AI-powered inventory and business-management assistant for Indian retail shops.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
