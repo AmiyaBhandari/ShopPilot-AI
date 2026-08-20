@@ -4,7 +4,10 @@ import android.graphics.Bitmap
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
+import com.example.data.local.entity.CustomerEntity
 import com.example.data.local.entity.PaymentMethod
+import com.example.data.local.entity.ProductEntity
+import com.example.data.local.entity.SaleEntity
 import com.example.data.local.entity.SaleItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -262,7 +265,7 @@ class GeminiAiService {
                                 productName = name,
                                 quantity = qty,
                                 unitPrice = price,
-                                costPrice = price * 0.8,
+                                costPrice = 0.0, // Never invent or fabricate costPrice; verified from ProductEntity in database
                                 total = qty * price
                             )
                         )
@@ -403,6 +406,56 @@ class GeminiAiService {
             notes = json.optString("notes", ""),
             needsReview = json.optBoolean("needsReview", false)
         )
+    }
+
+    // --- Privacy-Preserving Specialized Context Builders ---
+
+    fun buildInventoryContext(products: List<ProductEntity>): String {
+        val prodArray = JSONArray()
+        for (p in products) {
+            prodArray.put(
+                JSONObject().apply {
+                    put("id", p.id)
+                    put("name", p.name)
+                    put("category", p.category)
+                    put("unit", p.unit)
+                    put("sellingPrice", p.sellingPrice)
+                    put("currentStock", p.currentStock)
+                    put("minStock", p.minimumStock)
+                    if (p.barcode.isNotBlank()) put("barcode", p.barcode)
+                    if (p.sku.isNotBlank()) put("sku", p.sku)
+                }
+            )
+        }
+        return prodArray.toString(2)
+    }
+
+    fun buildSalesSummaryContext(todaySales: List<SaleEntity>, yesterdaySales: List<SaleEntity>? = null): String {
+        val root = JSONObject()
+        root.put("todaySalesTotal", todaySales.sumOf { it.total })
+        root.put("todaySalesCount", todaySales.size)
+        root.put("todayCashTotal", todaySales.filter { it.paymentMethod == PaymentMethod.CASH }.sumOf { it.total })
+        root.put("todayUpiTotal", todaySales.filter { it.paymentMethod == PaymentMethod.UPI }.sumOf { it.total })
+        root.put("todayCreditTotal", todaySales.filter { it.paymentMethod == PaymentMethod.CREDIT }.sumOf { it.total })
+
+        if (yesterdaySales != null) {
+            root.put("yesterdaySalesTotal", yesterdaySales.sumOf { it.total })
+            root.put("yesterdaySalesCount", yesterdaySales.size)
+        }
+        return root.toString(2)
+    }
+
+    fun buildKhataSummaryContext(customers: List<CustomerEntity>): String {
+        val custArray = JSONArray()
+        for (c in customers.filter { it.creditBalance > 0 }) {
+            custArray.put(
+                JSONObject().apply {
+                    put("name", c.name)
+                    put("creditBalance", c.creditBalance)
+                }
+            )
+        }
+        return custArray.toString(2)
     }
 
     private fun extractJson(raw: String): String {

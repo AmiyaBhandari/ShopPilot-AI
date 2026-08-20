@@ -8,11 +8,12 @@ import com.example.data.ai.*
 import com.example.data.local.AppDatabase
 import com.example.data.local.entity.*
 import com.example.data.repository.*
+import com.example.data.util.ProductMatchResult
+import com.example.data.util.ProductMatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import java.util.Calendar
 
 data class ChatMessage(
@@ -27,7 +28,15 @@ data class ChatMessage(
 data class UiNotification(
     val message: String,
     val isError: Boolean = false,
+    val canUndo: Boolean = false,
     val id: Long = System.currentTimeMillis()
+)
+
+data class AmbiguousProductChoice(
+    val queryName: String,
+    val candidates: List<ProductEntity>,
+    val onSelected: (ProductEntity) -> Unit,
+    val onDismiss: () -> Unit
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -154,6 +163,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _deadStockList = MutableStateFlow<List<DeadStockItem>>(emptyList())
     val deadStockList: StateFlow<List<DeadStockItem>> = _deadStockList.asStateFlow()
 
+    private val _deadStockThreshold = MutableStateFlow(30)
+    val deadStockThreshold: StateFlow<Int> = _deadStockThreshold.asStateFlow()
+
     // --- AI Chat State ---
     private val _chatMessages = MutableStateFlow<List<ChatMessage>>(
         listOf(
@@ -179,6 +191,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _proposedAction = MutableStateFlow<ParsedIntentAction?>(null)
     val proposedAction: StateFlow<ParsedIntentAction?> = _proposedAction.asStateFlow()
 
+    // --- Disambiguation State ---
+    private val _disambiguationChoice = MutableStateFlow<AmbiguousProductChoice?>(null)
+    val disambiguationChoice: StateFlow<AmbiguousProductChoice?> = _disambiguationChoice.asStateFlow()
+
+    // --- Backup Preview State ---
+    private val _backupPreview = MutableStateFlow<BackupPreview?>(null)
+    val backupPreview: StateFlow<BackupPreview?> = _backupPreview.asStateFlow()
+
+    // --- Undo State ---
+    private val _lastUndoableAction = MutableStateFlow<UndoableAction?>(null)
+    val lastUndoableAction: StateFlow<UndoableAction?> = _lastUndoableAction.asStateFlow()
+
     // --- UI Notifications ---
     private val _notification = MutableStateFlow<UiNotification?>(null)
     val notification: StateFlow<UiNotification?> = _notification.asStateFlow()
@@ -191,15 +215,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _notification.value = null
     }
 
-    fun showToast(msg: String, isError: Boolean = false) {
-        _notification.value = UiNotification(msg, isError)
+    fun showToast(msg: String, isError: Boolean = false, canUndo: Boolean = false) {
+        _notification.value = UiNotification(msg, isError, canUndo)
+    }
+
+    fun setDeadStockThreshold(days: Int) {
+        _deadStockThreshold.value = days
+        refreshIntelligence()
     }
 
     fun refreshIntelligence() {
         viewModelScope.launch {
             try {
                 _purchaseRecommendations.value = repository.calculatePurchaseRecommendations()
-                _deadStockList.value = repository.calculateDeadStock()
+                _deadStockList.value = repository.calculateDeadStock(_deadStockThreshold.value)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -215,7 +244,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isAiLoading.value = true
             try {
-                val contextJson = repository.getShopContextForAi()
+                val contextJson = aiService.buildInventoryContext(products.value)
                 val lang = settings.value?.language ?: "Hinglish"
                 val response = aiService.askAssistant(query, contextJson, lang)
 
@@ -237,7 +266,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // --- Voice Intent Parsing ---
+    // --- Voice Intent Parsing & Multi-Tier Database Matching ---
     fun processVoiceInput(speechText: String) {
         if (speechText.isBlank()) return
         val userMsg = ChatMessage(sender = "user", text = "🎤 \"$speechText\"")
@@ -246,7 +275,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isAiLoading.value = true
             try {
-                val catalogJson = repository.getShopContextForAi()
+                val catalogJson = aiService.buildInventoryContext(products.value)
                 val action = aiService.parseVoiceIntent(speechText, catalogJson)
 
                 when (action) {
@@ -257,11 +286,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             reasoning = action.dataReasoning
                         )
                     }
-                    is ParsedIntentAction.RecordSale,
-                    is ParsedIntentAction.RecordPurchase,
+                    is ParsedIntentAction.RecordSale -> {
+                        resolveVoiceSaleItems(action)
+                    }
+                    is ParsedIntentAction.RecordPurchase -> {
+                        resolveVoicePurchaseItem(action)
+                    }
                     is ParsedIntentAction.AdjustStock,
                     is ParsedIntentAction.CustomerPayment -> {
-                        // Prompt user to confirm before modifying data
                         _proposedAction.value = action
                     }
                     is ParsedIntentAction.Unknown -> {
@@ -272,11 +304,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } catch (e: Exception) {
-                // Fallback heuristic intent
                 handleOfflineVoiceIntent(speechText)
             } finally {
                 _isAiLoading.value = false
             }
+        }
+    }
+
+    private fun resolveVoiceSaleItems(saleAction: ParsedIntentAction.RecordSale) {
+        val catalog = products.value
+        val resolved = mutableListOf<SaleItem>()
+        var pendingAmbiguity: AmbiguousProductChoice? = null
+
+        for (item in saleAction.items) {
+            val match = ProductMatcher.matchProduct(item.productName, catalog)
+            when {
+                match.exactMatch != null -> {
+                    val p = match.exactMatch
+                    resolved.add(
+                        item.copy(
+                            productId = p.id,
+                            productName = p.name,
+                            unitPrice = if (item.unitPrice > 0) item.unitPrice else p.sellingPrice,
+                            costPrice = p.costPrice,
+                            total = item.quantity * (if (item.unitPrice > 0) item.unitPrice else p.sellingPrice)
+                        )
+                    )
+                }
+                match.isAmbiguous -> {
+                    pendingAmbiguity = AmbiguousProductChoice(
+                        queryName = item.productName,
+                        candidates = match.candidates,
+                        onSelected = { selectedProd ->
+                            _disambiguationChoice.value = null
+                            val updatedItem = item.copy(
+                                productId = selectedProd.id,
+                                productName = selectedProd.name,
+                                unitPrice = if (item.unitPrice > 0) item.unitPrice else selectedProd.sellingPrice,
+                                costPrice = selectedProd.costPrice,
+                                total = item.quantity * (if (item.unitPrice > 0) item.unitPrice else selectedProd.sellingPrice)
+                            )
+                            val remaining = saleAction.items.filter { it != item }
+                            resolveVoiceSaleItems(saleAction.copy(items = resolved + updatedItem + remaining))
+                        },
+                        onDismiss = {
+                            _disambiguationChoice.value = null
+                            showToast("Action cancelled: disambiguation required.")
+                        }
+                    )
+                    break
+                }
+                else -> {
+                    // Unmatched product
+                    resolved.add(item)
+                }
+            }
+        }
+
+        if (pendingAmbiguity != null) {
+            _disambiguationChoice.value = pendingAmbiguity
+        } else {
+            _proposedAction.value = saleAction.copy(items = resolved)
+        }
+    }
+
+    private fun resolveVoicePurchaseItem(purchaseAction: ParsedIntentAction.RecordPurchase) {
+        val catalog = products.value
+        val match = ProductMatcher.matchProduct(purchaseAction.productName, catalog)
+        if (match.isAmbiguous) {
+            _disambiguationChoice.value = AmbiguousProductChoice(
+                queryName = purchaseAction.productName,
+                candidates = match.candidates,
+                onSelected = { selectedProd ->
+                    _disambiguationChoice.value = null
+                    _proposedAction.value = purchaseAction.copy(
+                        productName = selectedProd.name,
+                        unitCost = if (purchaseAction.unitCost > 0) purchaseAction.unitCost else selectedProd.costPrice
+                    )
+                },
+                onDismiss = {
+                    _disambiguationChoice.value = null
+                }
+            )
+        } else if (match.exactMatch != null) {
+            val p = match.exactMatch
+            _proposedAction.value = purchaseAction.copy(
+                productName = p.name,
+                unitCost = if (purchaseAction.unitCost > 0) purchaseAction.unitCost else p.costPrice
+            )
+        } else {
+            _proposedAction.value = purchaseAction
         }
     }
 
@@ -289,19 +406,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 when (action) {
                     is ParsedIntentAction.RecordSale -> {
-                        // Match item productIds if possible
                         val catalog = products.value
                         val resolvedItems = action.items.map { item ->
-                            val match = catalog.find { it.name.contains(item.productName, ignoreCase = true) || item.productName.contains(it.name, ignoreCase = true) }
-                            if (match != null) {
-                                item.copy(
-                                    productId = match.id,
-                                    productName = match.name,
-                                    unitPrice = if (item.unitPrice > 0) item.unitPrice else match.sellingPrice,
-                                    costPrice = match.costPrice,
-                                    total = item.quantity * (if (item.unitPrice > 0) item.unitPrice else match.sellingPrice)
-                                )
-                            } else item
+                            if (item.productId.isNotBlank()) {
+                                item
+                            } else {
+                                val match = ProductMatcher.matchProduct(item.productName, catalog).exactMatch
+                                if (match != null) {
+                                    item.copy(
+                                        productId = match.id,
+                                        productName = match.name,
+                                        unitPrice = if (item.unitPrice > 0) item.unitPrice else match.sellingPrice,
+                                        costPrice = match.costPrice,
+                                        total = item.quantity * (if (item.unitPrice > 0) item.unitPrice else match.sellingPrice)
+                                    )
+                                } else {
+                                    item
+                                }
+                            }
                         }
 
                         var custId: String? = null
@@ -310,21 +432,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             custId = cust?.id
                         }
 
-                        repository.recordSale(
+                        val (_, undoAction) = repository.recordSale(
                             items = resolvedItems,
                             paymentMethod = action.paymentMethod,
                             customerId = custId,
                             customerName = action.customerName,
                             notes = "Recorded via Voice: ${action.rawSpeech}"
                         )
-                        showToast("Sale recorded successfully via voice!")
+                        _lastUndoableAction.value = undoAction
+                        showToast("Sale of ₹${String.format("%.2f", resolvedItems.sumOf { it.total })} recorded!", canUndo = true)
                         _chatMessages.value = _chatMessages.value + ChatMessage(
                             sender = "assistant",
-                            text = "✅ Sale of ₹${String.format("%.2f", resolvedItems.sumOf { it.total })} (${action.paymentMethod}) record ho gayi hai aur stock update kar diya gaya hai."
+                            text = "✅ Sale of ₹${String.format("%.2f", resolvedItems.sumOf { it.total })} (${action.paymentMethod}) record ho gayi hai. [Undo available]"
                         )
                     }
+
                     is ParsedIntentAction.RecordPurchase -> {
-                        val prod = products.value.find { it.name.contains(action.productName, ignoreCase = true) }
+                        val prod = ProductMatcher.matchProduct(action.productName, products.value).exactMatch
                         val pId = prod?.id ?: ""
                         val pName = prod?.name ?: action.productName
                         val unitCost = if (action.unitCost > 0) action.unitCost else (prod?.costPrice ?: 0.0)
@@ -336,24 +460,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             unitCost = unitCost,
                             total = action.quantity * unitCost
                         )
-                        repository.recordPurchase(
+                        val (_, undoAction) = repository.recordPurchase(
                             supplierId = prod?.supplierId,
                             supplierName = action.supplierName,
                             invoiceNumber = "VOICE-${System.currentTimeMillis() % 10000}",
                             items = listOf(purchaseItem),
                             notes = "Voice purchase: ${action.rawSpeech}"
                         )
-                        showToast("Purchase recorded successfully!")
+                        _lastUndoableAction.value = undoAction
+                        showToast("Purchase recorded successfully!", canUndo = true)
                         _chatMessages.value = _chatMessages.value + ChatMessage(
                             sender = "assistant",
                             text = "✅ Purchase of ${action.quantity} units for '$pName' record kar di gayi hai."
                         )
                     }
+
                     is ParsedIntentAction.CustomerPayment -> {
                         val cust = customers.value.find { it.name.contains(action.customerName, ignoreCase = true) }
                         if (cust != null) {
-                            repository.recordCustomerPayment(cust.id, action.amount, "Voice Payment Received")
-                            showToast("Received ₹${action.amount} from ${cust.name}")
+                            val undoAction = repository.recordCustomerPayment(cust.id, action.amount, "Voice Payment Received")
+                            _lastUndoableAction.value = undoAction
+                            showToast("Received ₹${action.amount} from ${cust.name}", canUndo = true)
                             _chatMessages.value = _chatMessages.value + ChatMessage(
                                 sender = "assistant",
                                 text = "✅ ${cust.name} se ₹${action.amount} ki payment jama ho gayi hai. Naya balance: ₹${cust.creditBalance - action.amount}."
@@ -362,13 +489,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             showToast("Customer '${action.customerName}' not found in Khata.", true)
                         }
                     }
+
+                    is ParsedIntentAction.AdjustStock -> {
+                        val prod = ProductMatcher.matchProduct(action.productName, products.value).exactMatch
+                        if (prod != null) {
+                            val delta = action.newQuantity - prod.currentStock
+                            val undoAction = repository.adjustStock(prod.id, delta, StockMovementType.ADJUSTMENT, action.reason)
+                            _lastUndoableAction.value = undoAction
+                            showToast("Stock for ${prod.name} updated to ${action.newQuantity}", canUndo = true)
+                        } else {
+                            showToast("Product '${action.productName}' not found.", true)
+                        }
+                    }
                     else -> {}
                 }
                 refreshIntelligence()
+            } catch (e: InsufficientStockException) {
+                showToast(e.message ?: "Insufficient stock for sale", true)
             } catch (e: Exception) {
                 showToast("Action failed: ${e.message}", true)
             } finally {
                 _proposedAction.value = null
+            }
+        }
+    }
+
+    // --- Undo Execution ---
+    fun undoLastAction() {
+        val action = _lastUndoableAction.value ?: return
+        viewModelScope.launch {
+            try {
+                val success = repository.undoAction(action)
+                if (success) {
+                    _lastUndoableAction.value = null
+                    showToast("Successfully undone: ${action.description}")
+                    _chatMessages.value = _chatMessages.value + ChatMessage(
+                        sender = "assistant",
+                        text = "↩️ Undone: ${action.description} has been reverted."
+                    )
+                    refreshIntelligence()
+                } else {
+                    showToast("Could not undo action.", true)
+                }
+            } catch (e: Exception) {
+                showToast("Undo failed: ${e.message}", true)
             }
         }
     }
@@ -378,12 +542,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isScanningInvoice.value = true
             try {
-                val catalogJson = repository.getShopContextForAi()
+                val catalogJson = aiService.buildInventoryContext(products.value)
                 val extracted = aiService.extractInvoiceFromImage(bitmap, catalogJson)
 
                 // Match with catalog
                 val matchedItems = extracted.items.map { item ->
-                    val match = products.value.find { it.name.contains(item.productName, ignoreCase = true) || item.productName.contains(it.name, ignoreCase = true) }
+                    val match = ProductMatcher.matchProduct(item.productName, products.value).exactMatch
                     if (match != null) {
                         item.copy(
                             matchedProductId = match.id,
@@ -411,7 +575,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun confirmInvoicePurchase(invoice: ExtractedInvoice) {
         viewModelScope.launch {
             try {
-                // For items marked as new, create products
                 val finalItems = mutableListOf<PurchaseItem>()
                 for (item in invoice.items) {
                     var productId = item.matchedProductId
@@ -439,7 +602,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                repository.recordPurchase(
+                val (_, undoAction) = repository.recordPurchase(
                     supplierId = null,
                     supplierName = invoice.supplierName,
                     invoiceNumber = invoice.invoiceNumber,
@@ -449,8 +612,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     notes = invoice.notes
                 )
 
+                _lastUndoableAction.value = undoAction
                 _scannedInvoice.value = null
-                showToast("Invoice processed & inventory updated successfully!")
+                showToast("Invoice processed & inventory updated successfully!", canUndo = true)
                 refreshIntelligence()
             } catch (e: Exception) {
                 showToast("Failed to process invoice: ${e.message}", true)
@@ -467,7 +631,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         return when {
             q.contains("stock") || q.contains("maal") -> {
-                val lowNames = lowList.take(4).joinToString(", ") { "${it.name} (${it.currentStock} ${it.unit})" }
+                val lowNames = lowList.take(4).joinToString(", ") { "${it.name} (${it.currentStock.toInt()} ${it.unit})" }
                 Pair(
                     "Aapke paas kul ${prodList.size} products hain. ${lowList.size} products kam stock pe hain: $lowNames.",
                     "Local inventory calculation"
@@ -490,7 +654,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             q.contains("kharid") || q.contains("purchase") || q.contains("reorder") -> {
                 val recs = _purchaseRecommendations.value.take(3)
                 if (recs.isNotEmpty()) {
-                    val str = recs.mapIndexed { idx, r -> "${idx + 1}. ${r.product.name} — stock ${r.currentStock}, reorder ~${r.suggestedReorderQty.toInt()} units" }.joinToString("\n")
+                    val str = recs.mapIndexed { idx, r -> "${idx + 1}. ${r.product.name} — stock ${r.currentStock.toInt()}, reorder ~${r.suggestedReorderQty.toInt()} units (${r.confidence.label})" }.joinToString("\n")
                     Pair("Ye products khareedne ki salah hai:\n$str", "Sales velocity and reorder thresholds")
                 } else {
                     Pair("Abhi koi product urgent reorder level pe nahi hai.", "Stock is healthy")
@@ -507,7 +671,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun handleOfflineVoiceIntent(speech: String) {
         val s = speech.lowercase()
-        // Simple offline sale detection
         if (s.contains("bech") || s.contains("bika") || s.contains("sold") || s.contains("diya")) {
             val matched = products.value.find { s.contains(it.name.lowercase().take(5)) }
             if (matched != null) {
@@ -536,7 +699,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    // --- Demo & Data Management ---
+    // --- Standard Manual Actions ---
     fun saveProduct(product: ProductEntity) {
         viewModelScope.launch {
             repository.saveProduct(product)
@@ -547,16 +710,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun adjustStock(productId: String, delta: Double, type: StockMovementType, reason: String) {
         viewModelScope.launch {
-            repository.adjustStock(productId, delta, type, reason)
+            val undoAction = repository.adjustStock(productId, delta, type, reason)
+            _lastUndoableAction.value = undoAction
             refreshIntelligence()
-            showToast("Stock updated!")
+            showToast("Stock updated!", canUndo = true)
         }
     }
 
     fun recordCustomerPayment(customerId: String, amount: Double, note: String) {
         viewModelScope.launch {
-            repository.recordCustomerPayment(customerId, amount, note)
-            showToast("Recorded ₹$amount payment!")
+            val undoAction = repository.recordCustomerPayment(customerId, amount, note)
+            _lastUndoableAction.value = undoAction
+            showToast("Recorded ₹$amount payment!", canUndo = true)
         }
     }
 
@@ -595,9 +760,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         customerName: String
     ) {
         viewModelScope.launch {
-            repository.recordSale(items, paymentMethod, discount, customerId, customerName)
-            refreshIntelligence()
-            showToast("Sale recorded!")
+            try {
+                val (_, undoAction) = repository.recordSale(items, paymentMethod, discount, customerId, customerName)
+                _lastUndoableAction.value = undoAction
+                refreshIntelligence()
+                showToast("Sale recorded!", canUndo = true)
+            } catch (e: InsufficientStockException) {
+                showToast(e.message ?: "Insufficient stock for sale", true)
+            } catch (e: Exception) {
+                showToast("Failed to record sale: ${e.message}", true)
+            }
         }
     }
 
@@ -610,16 +782,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         notes: String = ""
     ) {
         viewModelScope.launch {
-            repository.recordPurchase(
-                supplierId = supplierId,
-                supplierName = supplierName,
-                invoiceNumber = invoiceNumber,
-                items = items,
-                paymentStatus = paymentStatus,
-                notes = notes
-            )
-            refreshIntelligence()
-            showToast("Inward recorded and stock updated!")
+            try {
+                val (_, undoAction) = repository.recordPurchase(
+                    supplierId = supplierId,
+                    supplierName = supplierName,
+                    invoiceNumber = invoiceNumber,
+                    items = items,
+                    paymentStatus = paymentStatus,
+                    notes = notes
+                )
+                _lastUndoableAction.value = undoAction
+                refreshIntelligence()
+                showToast("Inward recorded and stock updated!", canUndo = true)
+            } catch (e: Exception) {
+                showToast("Failed to record purchase: ${e.message}", true)
+            }
         }
     }
 
@@ -627,7 +804,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.loadDemoShopData()
             refreshIntelligence()
-            showToast("Demo shop loaded with realistic general store data!")
+            showToast("Demo shop loaded with realistic store data!")
         }
     }
 
@@ -648,15 +825,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun importBackup(jsonString: String) {
+    fun prepareImportBackup(jsonString: String) {
+        val preview = repository.parseBackupPreview(jsonString)
+        if (preview != null) {
+            _backupPreview.value = preview
+        } else {
+            showToast("Invalid backup file or JSON format.", true)
+        }
+    }
+
+    fun confirmImportBackup() {
+        val preview = _backupPreview.value ?: return
         viewModelScope.launch {
-            val success = repository.importShopDataJson(jsonString)
+            val success = repository.importShopDataJson(preview.rawJson)
+            _backupPreview.value = null
             if (success) {
                 refreshIntelligence()
-                showToast("Shop data imported successfully!")
+                showToast("Shop data restored successfully (${preview.productCount} items, ${preview.saleCount} sales)!")
             } else {
-                showToast("Invalid backup JSON format.", true)
+                showToast("Failed to restore backup data.", true)
             }
         }
+    }
+
+    fun cancelImportBackup() {
+        _backupPreview.value = null
     }
 }

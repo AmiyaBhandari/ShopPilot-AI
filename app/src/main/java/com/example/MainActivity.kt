@@ -28,6 +28,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.MainViewModel
 import com.example.ui.components.ActionConfirmDialog
+import com.example.ui.components.BackupRestorePreviewDialog
+import com.example.ui.components.ProductDisambiguationDialog
+import com.example.ui.components.UndoNotificationBar
 import com.example.ui.dialogs.QuickSaleDialog
 import com.example.ui.dialogs.RecordPurchaseDialog
 import com.example.ui.dialogs.VoiceInputDialog
@@ -70,6 +73,8 @@ fun ShopPilotApp(viewModel: MainViewModel) {
     val metrics by viewModel.dashboardMetrics.collectAsState()
     val activeInsights by viewModel.activeInsights.collectAsState()
     val proposedAction by viewModel.proposedAction.collectAsState()
+    val disambiguationChoice by viewModel.disambiguationChoice.collectAsState()
+    val backupPreview by viewModel.backupPreview.collectAsState()
     val notification by viewModel.notification.collectAsState()
 
     var currentDestination by remember { mutableStateOf(AppDestination.DASHBOARD) }
@@ -342,5 +347,44 @@ fun ShopPilotApp(viewModel: MainViewModel) {
             onConfirm = { viewModel.executeProposedAction(action) },
             onDismiss = { viewModel.dismissProposedAction() }
         )
+    }
+
+    // AI Product Disambiguation Dialog
+    disambiguationChoice?.let { choice ->
+        ProductDisambiguationDialog(
+            queryName = choice.queryName,
+            candidates = choice.candidates,
+            onSelectProduct = choice.onSelected,
+            onDismiss = choice.onDismiss
+        )
+    }
+
+    // Backup Restore Preview & Confirmation Dialog
+    backupPreview?.let { preview ->
+        BackupRestorePreviewDialog(
+            preview = preview,
+            onConfirmRestore = { viewModel.confirmImportBackup() },
+            onDismiss = { viewModel.cancelImportBackup() }
+        )
+    }
+
+    // Floating Undo Toast / Notification Bar
+    notification?.let { notif ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 72.dp),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            UndoNotificationBar(
+                message = notif.message,
+                canUndo = notif.canUndo,
+                onUndo = {
+                    viewModel.undoLastAction()
+                    viewModel.clearNotification()
+                },
+                onDismiss = { viewModel.clearNotification() }
+            )
+        }
     }
 }

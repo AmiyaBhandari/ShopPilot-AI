@@ -52,6 +52,7 @@ fun AiShopAssistantScreen(
     val isAiLoading by viewModel.isAiLoading.collectAsState()
     val recommendations by viewModel.purchaseRecommendations.collectAsState()
     val deadStockList by viewModel.deadStockList.collectAsState()
+    val deadStockThreshold by viewModel.deadStockThreshold.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val priceHistory by viewModel.priceHistory.collectAsState()
 
@@ -293,7 +294,12 @@ fun AiShopAssistantScreen(
                     )
                 }
                 AssistantTab.DEAD_STOCK -> {
-                    DeadStockTab(deadStockList = deadStockList, currency = currency)
+                    DeadStockTab(
+                        deadStockList = deadStockList,
+                        currentThreshold = deadStockThreshold,
+                        onThresholdChange = { viewModel.setDeadStockThreshold(it) },
+                        currency = currency
+                    )
                 }
                 AssistantTab.MARGIN_ALERTS -> {
                     MarginAlertsTab(priceHistory = priceHistory, currency = currency)
@@ -441,17 +447,31 @@ fun PurchaseRecommendationsTab(
                                 style = MaterialTheme.typography.titleSmall,
                                 modifier = Modifier.weight(1f)
                             )
-                            Surface(
-                                color = StatusCriticalBg,
-                                shape = RoundedCornerShape(6.dp)
-                            ) {
-                                Text(
-                                    text = "~${String.format("%.1f", rec.estimatedDaysRemaining)} days left",
-                                    color = StatusCritical,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = rec.confidence.label,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Surface(
+                                    color = StatusCriticalBg,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = "~${String.format("%.1f", rec.estimatedDaysRemaining)} days left",
+                                        color = StatusCritical,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
 
@@ -491,66 +511,93 @@ fun PurchaseRecommendationsTab(
 }
 
 @Composable
-fun DeadStockTab(deadStockList: List<DeadStockItem>, currency: String) {
-    if (deadStockList.isEmpty()) {
-        Box(
+fun DeadStockTab(
+    deadStockList: List<DeadStockItem>,
+    currentThreshold: Int,
+    onThresholdChange: (Int) -> Unit,
+    currency: String
+) {
+    val thresholds = listOf(15, 30, 60, 90)
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("No dead stock detected! All products are moving.")
+            Text("Inactive for:", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            thresholds.forEach { days ->
+                FilterChip(
+                    selected = currentThreshold == days,
+                    onClick = { onThresholdChange(days) },
+                    label = { Text("${days}d", fontSize = 11.sp) },
+                    shape = RoundedCornerShape(8.dp)
+                )
+            }
         }
-    } else {
-        LazyColumn(
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 120.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            val totalCostLocked = deadStockList.sumOf { it.inventoryCost }
-            item {
-                Surface(
-                    color = StatusDeadStockBg,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(14.dp)) {
-                        Text("Capital Locked in Inactive Stock", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Text(
-                            text = "$currency${String.format("%.2f", totalCostLocked)}",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = StatusDeadStock
-                        )
-                        Text("Products with 0 sales in past 30+ days.", fontSize = 11.sp)
+
+        if (deadStockList.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("No dead stock detected for past $currentThreshold days! All products are moving.")
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 120.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                val totalCostLocked = deadStockList.sumOf { it.inventoryCost }
+                item {
+                    Surface(
+                        color = StatusDeadStockBg,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Text("Capital Locked in Inactive Stock", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                text = "$currency${String.format("%.2f", totalCostLocked)}",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = StatusDeadStock
+                            )
+                            Text("Products with 0 sales in past $currentThreshold+ days.", fontSize = 11.sp)
+                        }
                     }
                 }
-            }
 
-            items(deadStockList, key = { it.product.id }) { item ->
-                Card(
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                items(deadStockList, key = { it.product.id }) { item ->
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text(text = item.product.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
-                            Text(text = "${item.daysSinceLastSale}d inactive", fontSize = 11.sp, color = StatusWarning)
-                        }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = item.product.name, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                                Text(text = "${item.daysSinceLastSale}d inactive", fontSize = 11.sp, color = StatusWarning)
+                            }
 
-                        Text("Stock: ${item.currentStock.toInt()} • Locked Value: $currency${String.format("%.0f", item.inventoryCost)}")
-                        Text(
-                            text = "💡 Advice: ${item.suggestedAction}",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = BrandSecondary
-                        )
+                            Text("Stock: ${item.currentStock.toInt()} • Locked Value: $currency${String.format("%.0f", item.inventoryCost)}")
+                            Text(
+                                text = "💡 Advice: ${item.suggestedAction}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = BrandSecondary
+                            )
+                        }
                     }
                 }
             }

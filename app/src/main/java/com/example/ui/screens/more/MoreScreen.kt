@@ -345,13 +345,13 @@ fun MoreScreen(
                 Button(
                     onClick = {
                         if (importJsonText.isNotBlank()) {
-                            viewModel.importBackup(importJsonText)
+                            viewModel.prepareImportBackup(importJsonText)
                             showImportDialog = false
                         }
                     },
                     enabled = importJsonText.isNotBlank()
                 ) {
-                    Text("Restore Data")
+                    Text("Preview & Restore")
                 }
             },
             dismissButton = {

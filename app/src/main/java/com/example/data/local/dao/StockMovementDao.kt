@@ -30,6 +30,9 @@ interface StockMovementDao {
     @Query("DELETE FROM stock_movements WHERE id = :id")
     suspend fun deleteMovementById(id: String)
 
+    @Query("DELETE FROM stock_movements WHERE referenceId = :refId")
+    suspend fun deleteMovementsByReferenceId(refId: String)
+
     @Query("DELETE FROM stock_movements")
     suspend fun deleteAll()
 }

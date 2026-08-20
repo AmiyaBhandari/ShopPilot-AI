@@ -16,6 +16,9 @@ interface SupplierDao {
     @Query("SELECT * FROM suppliers WHERE id = :id LIMIT 1")
     suspend fun getSupplierById(id: String): SupplierEntity?
 
+    @Query("SELECT * FROM suppliers WHERE name = :name LIMIT 1")
+    suspend fun getSupplierByName(name: String): SupplierEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSupplier(supplier: SupplierEntity)
 

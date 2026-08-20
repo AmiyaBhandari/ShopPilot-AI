@@ -365,3 +365,225 @@ fun ActionConfirmDialog(
         }
     )
 }
+
+@Composable
+fun ProductDisambiguationDialog(
+    queryName: String,
+    candidates: List<ProductEntity>,
+    onSelectProduct: (ProductEntity) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Select Matching Product",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Multiple products matched '$queryName'. Please choose the exact item:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                candidates.forEach { prod ->
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelectProduct(prod) }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = prod.name,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = "Stock: ${prod.currentStock.toInt()} ${prod.unit} • ${prod.category}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text(
+                                text = "₹${String.format("%.2f", prod.sellingPrice)}",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun BackupRestorePreviewDialog(
+    preview: com.example.data.repository.BackupPreview,
+    onConfirmRestore: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Text(
+                    text = "Confirm Data Restore",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Restoring this backup will replace current store data with the following backup snapshot:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(text = "🏪 Store: ${preview.shopName}", fontWeight = FontWeight.Bold)
+                        Text(text = "📦 Products: ${preview.productCount}")
+                        Text(text = "👥 Customers: ${preview.customerCount}")
+                        Text(text = "🚚 Suppliers: ${preview.supplierCount}")
+                        Text(text = "🛒 Sales Records: ${preview.saleCount}")
+                        Text(text = "📄 Inward Records: ${preview.purchaseCount}")
+                        Text(
+                            text = "Backup Format: v${preview.version}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirmRestore,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Restore & Overwrite")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun UndoNotificationBar(
+    message: String,
+    canUndo: Boolean,
+    onUndo: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.inverseSurface,
+        shape = RoundedCornerShape(12.dp),
+        shadowElevation = 6.dp,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = message,
+                color = MaterialTheme.colorScheme.inverseOnSurface,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            if (canUndo) {
+                TextButton(
+                    onClick = onUndo,
+                    contentPadding = PaddingValues(horizontal = 8.dp)
+                ) {
+                    Text(
+                        text = "UNDO",
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.inversePrimary
+                    )
+                }
+            }
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = MaterialTheme.colorScheme.inverseOnSurface.copy(alpha = 0.7f),
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+    }
+}
+
